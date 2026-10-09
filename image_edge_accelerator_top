@@ -1,0 +1,113 @@
+`timescale 1ns / 1ps
+
+module image_edge_accelerator_top #(
+    parameter BASE_ADDR = 32'h2000_0000,
+    parameter IMG_WIDTH = 64                  // <--- Changed to 64
+)(
+    input  wire        clk,
+    input  wire        rst_n,
+
+    // PicoRV32 Native Memory Interface
+    input  wire        mem_valid,
+    output reg         mem_ready,
+    input  wire [31:0] mem_addr,
+    input  wire [31:0] mem_wdata,
+    input  wire [ 3:0] mem_wstrb,
+    output reg  [31:0] mem_rdata
+);
+
+    // Peripheral Internal Registers
+    reg [7:0] reg_ctrl;        // [0]=Enable, [1]=SoftReset
+    reg [7:0] reg_threshold;
+    reg [7:0] reg_pixel_in;
+    reg       in_valid_pulse;
+
+    // FIFO / Output Buffer
+    reg [7:0] out_pixel_fifo;
+    reg       out_fifo_valid;
+
+    // Line buffer signals
+    wire m_valid;
+    wire [7:0] p00, p01, p02, p10, p11, p12, p20, p21, p22;
+
+    // 3x3 Window Extractor (Configured for 64 width)
+    matrix_3x3_gen #(.IMG_WIDTH(IMG_WIDTH)) u_matrix_gen (
+        .clk(clk),
+        .rst_n(rst_n && !reg_ctrl[1]),
+        .in_valid(in_valid_pulse),
+        .in_pixel(reg_pixel_in),
+        .out_valid(m_valid),
+        .p00(p00), .p01(p01), .p02(p02),
+        .p10(p10), .p11(p11), .p12(p12),
+        .p20(p20), .p21(p21), .p22(p22)
+    );
+
+    // Sobel calculation
+    wire sobel_valid;
+    wire [7:0] sobel_pixel;
+
+    sobel_filter_3x3 u_sobel (
+        .clk(clk),
+        .rst_n(rst_n && !reg_ctrl[1]),
+        .in_valid(m_valid),
+        .threshold(reg_threshold),
+        .p00(p00), .p01(p01), .p02(p02),
+        .p10(p10), .p11(p11), .p12(p12),
+        .p20(p20), .p21(p21), .p22(p22),
+        .out_valid(sobel_valid),
+        .out_edge(sobel_pixel)
+    );
+
+    // Buffer processed pixel
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            out_pixel_fifo <= 8'd0;
+            out_fifo_valid <= 1'b0;
+        end else if (sobel_valid) begin
+            out_pixel_fifo <= sobel_pixel;
+            out_fifo_valid <= 1'b1;
+        end else if (mem_valid && !mem_wstrb && (mem_addr[7:0] == 8'h08)) begin
+            out_fifo_valid <= 1'b0; // cleared on read
+        end
+    end
+
+    // Bus Decoding & MMIO Handshake
+    wire is_selected = mem_valid && (mem_addr[31:8] == BASE_ADDR[31:8]);
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            mem_ready      <= 1'b0;
+            mem_rdata      <= 32'd0;
+            reg_ctrl       <= 8'h01; // Enabled by default
+            reg_threshold  <= 8'd70; // Default threshold
+            reg_pixel_in   <= 8'd0;
+            in_valid_pulse <= 1'b0;
+        end else begin
+            in_valid_pulse <= 1'b0;
+
+            if (is_selected && !mem_ready) begin
+                mem_ready <= 1'b1;
+
+                if (|mem_wstrb) begin
+                    case (mem_addr[7:0])
+                        8'h00: reg_ctrl      <= mem_wdata[7:0];
+                        8'h04: begin
+                            reg_pixel_in   <= mem_wdata[7:0];
+                            in_valid_pulse <= 1'b1;
+                        end
+                        8'h0C: reg_threshold <= mem_wdata[7:0];
+                    endcase
+                end else begin
+                    case (mem_addr[7:0])
+                        8'h00: mem_rdata <= {28'b0, 1'b1, out_fifo_valid, reg_ctrl[1:0]};
+                        8'h08: mem_rdata <= {24'b0, out_pixel_fifo};
+                        8'h0C: mem_rdata <= {24'b0, reg_threshold};
+                        default: mem_rdata <= 32'h0;
+                    endcase
+                end
+            end else begin
+                mem_ready <= 1'b0;
+            end
+        end
+    end
+endmodule
