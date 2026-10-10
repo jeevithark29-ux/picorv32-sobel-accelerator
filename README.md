@@ -1,3 +1,4 @@
+<img width="522" height="256" alt="comparison" src="https://github.com/user-attachments/assets/4d74707a-8829-4d85-b4cc-8d0d698d00ed" />
 # PicoRV32-Based RISC-V SoC with Hardware-Accelerated Sobel Image Accelerator on FPGA
 
 > Status: work in progress. Items marked **TODO** will be filled in after they are tested on the board.
